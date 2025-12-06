@@ -8,17 +8,21 @@
     <!-- 1. 引入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     
-    <!-- 2. 引入 Babel -->
+    <!-- 2. 引入 Leaflet CSS (地圖樣式) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    
+    <!-- 3. 引入 Babel -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
-    <!-- 3. 設定 Import Map (改用 ESM 模組載入所有套件，包含 FIT 解析器) -->
+    <!-- 4. 設定 Import Map -->
     <script type="importmap">
     {
         "imports": {
             "react": "https://esm.sh/react@18.2.0",
             "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
             "lucide-react": "https://esm.sh/lucide-react@0.292.0",
-            "fit-file-parser": "https://esm.sh/fit-file-parser@1.9.0?bundle"
+            "fit-file-parser": "https://esm.sh/fit-file-parser@1.9.0?bundle",
+            "leaflet": "https://unpkg.com/leaflet@1.9.4/dist/leaflet-src.esm.js"
         }
     }
     </script>
@@ -31,15 +35,25 @@
             to { opacity: 1; transform: translateY(0); }
         }
         .animate-fade-in { animation: fadeIn 0.5s ease-out forwards; }
+        
+        /* 地圖容器高度設定 */
+        #map-container {
+            height: 500px;
+            width: 100%;
+            z-index: 0;
+        }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-900">
     <div id="root"></div>
 
     <script type="text/babel" data-type="module">
-        import React, { useState, useEffect } from 'react';
+        import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Upload, Wind, Utensils, Zap, Clock, Bike, AlertCircle, PlayCircle, FileText, CheckCircle, Edit3, Coffee, Timer } from 'lucide-react';
+        import { Upload, Wind, Utensils, Zap, Clock, Bike, AlertCircle, PlayCircle, FileText, CheckCircle, Edit3, Coffee, Timer, CloudSun, Calendar, Thermometer, ArrowRight, MapPin, List, Map as MapIcon } from 'lucide-react';
+        
+        // 修正：使用 * as L 來匯入 Leaflet，因為 ESM 版本沒有 default export
+        import * as L from 'leaflet';
 
         const SEGMENTS = [
             { id: 1, name: "第一段：關渡 → 新竹代天府", start: 0, end: 75.5, note: "西濱起點，體力充沛" },
@@ -48,12 +62,29 @@
             { id: 4, name: "第四段：布袋大眾廟 → 左營大義國中", start: 275, end: 367.6, note: "台南市區紅綠燈與最後的意志力" }
         ];
 
+        // 包含座標的停靠點資料
         const STOPS = [
-            { name: "新竹代天府", km: 75.5, type: "宮廟/便利商店" },
-            { name: "伸港寶天宮", km: 168, type: "宮廟/補給車" },
-            { name: "布袋大眾廟", km: 275, type: "宮廟/便利商店" },
-            { name: "楠梓 (麥當勞/超商)", km: 340, type: "市區補給點" },
-            { name: "終點 (大義國中)", km: 367.6, type: "終點" }
+            { name: "新竹代天府", km: 75.5, type: "宮廟/便利商店", lat: 24.8257, lon: 120.9566 },
+            { name: "伸港寶天宮", km: 168, type: "宮廟/補給車", lat: 24.1614, lon: 120.4853 },
+            { name: "布袋大眾廟", km: 275, type: "宮廟/便利商店", lat: 23.3700, lon: 120.1583 },
+            { name: "楠梓 (麥當勞/超商)", km: 340, type: "市區補給點", lat: 22.7275, lon: 120.3129 },
+            { name: "終點 (大義國中)", km: 367.6, type: "終點", lat: 22.6711, lon: 120.2872 }
+        ];
+
+        const START_POINT = { name: "起點 (關渡)", lat: 25.1132, lon: 121.4607, km: 0 };
+
+        // 沿途主要氣象觀測點 (Lat, Lon)
+        const WAYPOINTS = [
+            { name: "新北 (八里)", lat: 25.14, lon: 121.39, km: 10 },
+            { name: "桃園 (觀音)", lat: 25.03, lon: 121.08, km: 40 },
+            { name: "新竹 (香山)", lat: 24.77, lon: 120.91, km: 80 },
+            { name: "苗栗 (通霄)", lat: 24.49, lon: 120.67, km: 120 },
+            { name: "台中 (清水)", lat: 24.26, lon: 120.57, km: 155 },
+            { name: "彰化 (鹿港)", lat: 24.05, lon: 120.43, km: 180 },
+            { name: "雲林 (麥寮)", lat: 23.74, lon: 120.25, km: 220 },
+            { name: "嘉義 (布袋)", lat: 23.37, lon: 120.15, km: 270 },
+            { name: "台南 (七股)", lat: 23.14, lon: 120.08, km: 310 },
+            { name: "高雄 (左營)", lat: 22.68, lon: 120.29, km: 360 }
         ];
 
         const FOOD_SUGGESTIONS = {
@@ -63,17 +94,125 @@
             recovery: "巧克力牛奶、豆漿、雞胸肉"
         };
 
+        const getWeatherDesc = (code) => {
+            if (code === 0) return "晴朗";
+            if (code >= 1 && code <= 3) return "多雲";
+            if (code >= 45 && code <= 48) return "起霧";
+            if (code >= 51 && code <= 67) return "有雨";
+            if (code >= 71) return "雷雨/惡劣";
+            return "多雲時晴";
+        };
+
+        const getWindDirectionText = (deg) => {
+            if (deg === null || deg === undefined) return "-";
+            if (deg >= 337.5 || deg < 22.5) return "北風 (↓順)";
+            if (deg >= 22.5 && deg < 67.5) return "東北風 (↙順)";
+            if (deg >= 67.5 && deg < 112.5) return "東風 (←側)";
+            if (deg >= 112.5 && deg < 157.5) return "東南風 (↖逆)";
+            if (deg >= 157.5 && deg < 202.5) return "南風 (↑逆)";
+            if (deg >= 202.5 && deg < 247.5) return "西南風 (↗逆)";
+            if (deg >= 247.5 && deg < 292.5) return "西風 (→側)";
+            if (deg >= 292.5 && deg < 337.5) return "西北風 (↘順)";
+            return "不定向";
+        };
+
+        // 地圖組件
+        const RouteMap = ({ stops, startPoint }) => {
+            const mapRef = useRef(null);
+            const mapInstanceRef = useRef(null);
+
+            useEffect(() => {
+                if (!mapRef.current) return;
+                
+                // 如果地圖已經初始化過，就不再重複初始化
+                if (mapInstanceRef.current) {
+                    mapInstanceRef.current.invalidateSize(); // 確保重新渲染時大小正確
+                    return;
+                }
+
+                // 1. 初始化地圖
+                const map = L.map(mapRef.current).setView([23.9, 120.5], 8);
+                mapInstanceRef.current = map;
+
+                // 2. 加入圖層 (OpenStreetMap)
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '&copy; OpenStreetMap contributors'
+                }).addTo(map);
+
+                // 3. 定義 Icon
+                const createIcon = (color) => {
+                    // 使用 inline SVG 作為 icon 避免依賴外部圖片
+                    const svg = `
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-map-pin"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+                    `;
+                    return L.divIcon({
+                        className: 'custom-div-icon',
+                        html: `<div style="width: 30px; height: 30px; filter: drop-shadow(2px 4px 6px black);">${svg}</div>`,
+                        iconSize: [30, 42],
+                        iconAnchor: [15, 42],
+                        popupAnchor: [0, -45]
+                    });
+                };
+
+                const startIcon = createIcon('#22c55e'); // Green
+                const stopIcon = createIcon('#3b82f6'); // Blue
+                const finishIcon = createIcon('#ef4444'); // Red
+
+                // 4. 繪製路徑點
+                const points = [startPoint, ...stops];
+                const latlngs = points.map(p => [p.lat, p.lon]);
+
+                // 5. 繪製連線
+                L.polyline(latlngs, {color: 'blue', weight: 4, opacity: 0.6, dashArray: '10, 10'}).addTo(map);
+
+                // 6. 加入標記
+                points.forEach((point, idx) => {
+                    let icon = stopIcon;
+                    if (idx === 0) icon = startIcon;
+                    if (idx === points.length - 1) icon = finishIcon;
+
+                    const marker = L.marker([point.lat, point.lon], { icon: icon }).addTo(map);
+                    
+                    // Popup 內容
+                    const popupContent = `
+                        <div class="font-sans">
+                            <div class="font-bold text-base mb-1">${point.name}</div>
+                            <div class="text-sm text-gray-600">里程: ${point.km} km</div>
+                            ${point.eta ? `<div class="text-sm text-blue-600 font-bold mt-1">ETA: ${point.eta}</div>` : ''}
+                            ${point.suggestion ? `<div class="text-xs text-gray-500 mt-1 border-t pt-1">${point.suggestion}</div>` : ''}
+                        </div>
+                    `;
+                    marker.bindPopup(popupContent);
+                });
+
+                // 7. 自動調整視野
+                const bounds = L.latLngBounds(latlngs);
+                map.fitBounds(bounds, { padding: [50, 50] });
+
+                return () => {
+                    // Cleanup usually not needed for simple SPA but good practice
+                    // map.remove(); 
+                };
+            }, [stops]);
+
+            return <div id="map-container" ref={mapRef} className="rounded-xl border border-slate-300 shadow-inner"></div>;
+        };
+
         const BeiGaoPlanner = () => {
+            const today = new Date().toISOString().split('T')[0];
+            
             const [config, setConfig] = useState({
                 carbsPerHour: 70,
                 waterPerHour: 600,
                 sodiumPerHour: 500,
-                carbsPerGel: 25,
-                sodiumPerPill: 300,
+                carbsPerGel: 70, 
+                sodiumPerPill: 350, 
                 windDirection: 'tail',
                 windSpeed: 15,
+                rideDate: today, 
                 startTime: "00:00",
                 stopDuration: 20, 
+                useRealWeather: true 
             });
 
             const [fileStatus, setFileStatus] = useState({
@@ -93,12 +232,12 @@
             const [activeTab, setActiveTab] = useState('summary');
             const [isProcessing, setIsProcessing] = useState(false);
             const [errorMsg, setErrorMsg] = useState(null);
+            const [weatherData, setWeatherData] = useState(null); 
 
-            // --- 真正的 FIT 解析邏輯 (修正：改用動態 Import) ---
+            // --- FIT Parsing ---
             const parseFitFile = async (arrayBuffer) => {
                 let FitParser;
                 try {
-                    // 動態載入模組，確保相依性正確處理
                     const module = await import('fit-file-parser');
                     FitParser = module.default;
                 } catch (e) {
@@ -133,7 +272,6 @@
                                         if(session.avg_speed) maxAvgSpeed = Math.max(maxAvgSpeed, session.avg_speed);
                                     });
 
-                                    // Fallback to records if sessions are empty
                                     if (totalDistKm === 0 && data.records && data.records.length > 0) {
                                         const lastRecord = data.records[data.records.length - 1];
                                         totalDistKm = lastRecord.distance;
@@ -161,7 +299,7 @@
                 });
             };
 
-            // --- GPX 解析邏輯 ---
+            // --- GPX Parsing ---
             const parseGPX = (xmlDoc) => {
                 const getAllPoints = () => {
                     const allElements = xmlDoc.getElementsByTagName("*");
@@ -293,7 +431,6 @@
                 if (fileName.endsWith('.fit')) {
                     const reader = new FileReader();
                     reader.onload = (e) => {
-                        // 使用 parseFitFile (現在是 async)
                         parseFitFile(e.target.result)
                             .then(result => {
                                 setFileStatus({
@@ -374,7 +511,84 @@
                 setManualSpeed(demoSpeed);
             };
 
-            const generateReport = () => {
+            const fetchWeatherData = async (date) => {
+                const rideDate = new Date(date);
+                const today = new Date();
+                const diffDays = Math.ceil((rideDate - today) / (1000 * 60 * 60 * 24));
+                
+                if (diffDays > 15 || diffDays < -90) {
+                    return null; 
+                }
+
+                const endDateObj = new Date(rideDate);
+                endDateObj.setDate(endDateObj.getDate() + 1);
+                const endDate = endDateObj.toISOString().split('T')[0];
+
+                const promises = WAYPOINTS.map(async (wp) => {
+                    const url = `https://api.open-meteo.com/v1/forecast?latitude=${wp.lat}&longitude=${wp.lon}&hourly=temperature_2m,weathercode,windspeed_10m,winddirection_10m&start_date=${date}&end_date=${endDate}&timezone=Asia%2FTaipei`;
+                    try {
+                        const res = await fetch(url);
+                        const data = await res.json();
+                        return { ...wp, data: data.hourly };
+                    } catch (err) {
+                        console.error("Weather fetch failed", err);
+                        return { ...wp, error: true };
+                    }
+                });
+
+                return Promise.all(promises);
+            };
+
+            const calculateWindImpact = (weatherPoints, baseSpeed) => {
+                if (!weatherPoints) return { windFactor: 0, text: "手動設定" };
+
+                let totalWindFactor = 0;
+                let validPoints = 0;
+
+                weatherPoints.forEach(wp => {
+                    if (wp.error || !wp.data) return;
+                    
+                    const startIdx = 6;
+                    const endIdx = 18;
+                    let sumSpeed = 0;
+                    let sumDir = 0;
+                    let count = 0;
+
+                    for(let i=startIdx; i<=endIdx; i++) {
+                        if(wp.data.windspeed_10m[i] !== undefined) {
+                            sumSpeed += wp.data.windspeed_10m[i];
+                            sumDir += wp.data.winddirection_10m[i];
+                            count++;
+                        }
+                    }
+
+                    if (count > 0) {
+                        const avgSpeed = sumSpeed / count;
+                        const avgDir = sumDir / count; 
+                        
+                        let factor = 0;
+                        if ((avgDir >= 315 || avgDir <= 90)) {
+                            factor = avgSpeed * 0.25; 
+                        } else if (avgDir >= 135 && avgDir <= 225) {
+                            factor = -(avgSpeed * 0.4); 
+                        } else {
+                            factor = -(avgSpeed * 0.05);
+                        }
+                        
+                        totalWindFactor += factor;
+                        validPoints++;
+                    }
+                });
+
+                if (validPoints === 0) return { windFactor: 0, text: "資料不足" };
+                
+                return { 
+                    windFactor: totalWindFactor / validPoints, 
+                    text: "依據氣象預報自動修正" 
+                };
+            };
+
+            const generateReport = async () => {
                 const baseSpeedToUse = parseFloat(manualSpeed);
 
                 if (!baseSpeedToUse || baseSpeedToUse <= 0) {
@@ -382,25 +596,43 @@
                     return;
                 }
 
+                setIsProcessing(true); 
+
                 let windFactor = 0;
-                if (config.windDirection === 'tail') windFactor = config.windSpeed * 0.25; 
-                if (config.windDirection === 'head') windFactor = -(config.windSpeed * 0.4); 
-                if (config.windDirection === 'side') windFactor = -(config.windSpeed * 0.05);
+                let weatherInfo = null;
+                let weatherSourceText = "手動設定";
+
+                if (config.useRealWeather) {
+                    const weatherRes = await fetchWeatherData(config.rideDate);
+                    
+                    if (weatherRes) {
+                        weatherInfo = weatherRes;
+                        const impact = calculateWindImpact(weatherRes, baseSpeedToUse);
+                        windFactor = impact.windFactor;
+                        weatherSourceText = impact.text;
+                    } else {
+                        weatherSourceText = "日期超出預報範圍，使用手動設定";
+                        if (config.windDirection === 'tail') windFactor = config.windSpeed * 0.25; 
+                        if (config.windDirection === 'head') windFactor = -(config.windSpeed * 0.4); 
+                        if (config.windDirection === 'side') windFactor = -(config.windSpeed * 0.05);
+                    }
+                } else {
+                    if (config.windDirection === 'tail') windFactor = config.windSpeed * 0.25; 
+                    if (config.windDirection === 'head') windFactor = -(config.windSpeed * 0.4); 
+                    if (config.windDirection === 'side') windFactor = -(config.windSpeed * 0.05);
+                }
 
                 const adjustedBaseSpeed = baseSpeedToUse + windFactor;
 
                 let cumulativeRideTime = 0; 
                 
                 const [startH, startM] = config.startTime.split(':').map(Number);
-                const startDate = new Date();
-                startDate.setHours(startH, startM, 0, 0);
+                const startDate = new Date(`${config.rideDate}T${config.startTime}:00`);
 
                 const segmentResults = SEGMENTS.map((seg) => {
                     const segDist = seg.end - seg.start;
-                    
                     const fatigueDrop = (seg.start / 100) * 0.04; 
                     const fatigueFactor = Math.max(0.6, 1 - fatigueDrop); 
-
                     const predictedSpeed = Math.max(10, adjustedBaseSpeed * fatigueFactor); 
                     const durationHours = segDist / predictedSpeed;
 
@@ -440,8 +672,8 @@
                     const timeInSeg = distInSeg / parseFloat(targetSeg.avgSpeed);
                     
                     const totalRideHoursToStop = timeToStartOfSeg + timeInSeg;
-                    
                     const totalElapsedTimeAtArrival = totalRideHoursToStop + accumulatedBreakTimeHours;
+                    
                     const arrivalTime = new Date(startDate.getTime() + totalElapsedTimeAtArrival * 3600 * 1000);
 
                     const breakTimeHere = isFinish ? 0 : (config.stopDuration / 60);
@@ -464,16 +696,72 @@
                         sodium: Math.ceil(legDuration * config.sodiumPerHour)
                     };
 
+                    let stopWeather = null;
+                    if (weatherInfo) {
+                        const nearestWp = weatherInfo.reduce((prev, curr) => {
+                            return (Math.abs(curr.km - stop.km) < Math.abs(prev.km - stop.km) ? curr : prev);
+                        });
+                        
+                        const diffMs = arrivalTime - new Date(`${config.rideDate}T00:00:00`);
+                        const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+
+                        if (nearestWp && nearestWp.data && diffHours >= 0 && diffHours < nearestWp.data.time.length) {
+                            stopWeather = {
+                                temp: nearestWp.data.temperature_2m[diffHours] || "-",
+                                code: nearestWp.data.weathercode[diffHours] || 0,
+                                wind: nearestWp.data.windspeed_10m[diffHours] || "-",
+                                windDir: nearestWp.data.winddirection_10m[diffHours] || null
+                            };
+                        }
+                    }
+
                     return {
                         ...stop,
                         eta: arrivalTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', hour12: false}),
                         etd: isFinish ? "-" : departureTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', hour12: false}),
+                        etaDate: arrivalTime.getDate() !== startDate.getDate() ? "(次日)" : "",
                         totalHours: totalElapsedTimeAtArrival,
                         breakDuration: isFinish ? 0 : config.stopDuration,
                         suggestion: foodType,
-                        needs: needs
+                        needs: needs,
+                        weather: stopWeather
                     };
                 });
+
+                let enhancedWeatherInfo = null;
+                if (weatherInfo) {
+                    enhancedWeatherInfo = weatherInfo.map(wp => {
+                        const targetSeg = segmentResults.find(s => wp.km >= s.start && wp.km < s.end) || segmentResults[segmentResults.length - 1];
+                        const prevSegIndex = segmentResults.findIndex(s => s.id === targetSeg.id) - 1;
+                        const timeToStartOfSeg = prevSegIndex >= 0 ? segmentResults[prevSegIndex].cumulativeRideTime : 0;
+                        const distInSeg = wp.km - targetSeg.start;
+                        const timeInSeg = distInSeg / parseFloat(targetSeg.avgSpeed);
+                        const pureRideTime = timeToStartOfSeg + timeInSeg;
+                        
+                        const stopsPassed = stopResults.filter(s => s.km < wp.km).length;
+                        const totalElapsedTime = pureRideTime + (stopsPassed * (config.stopDuration / 60));
+                        
+                        const arrivalTime = new Date(startDate.getTime() + totalElapsedTime * 3600 * 1000);
+                        const diffMs = arrivalTime - new Date(`${config.rideDate}T00:00:00`);
+                        const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+
+                        let pointWeather = null;
+                        if (wp.data && diffHours >= 0 && diffHours < wp.data.time.length) {
+                            pointWeather = {
+                                time: arrivalTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', hour12: false}),
+                                temp: wp.data.temperature_2m[diffHours],
+                                code: wp.data.weathercode[diffHours],
+                                wind: wp.data.windspeed_10m[diffHours],
+                                dir: wp.data.winddirection_10m[diffHours]
+                            };
+                        }
+
+                        return { ...wp, estimate: pointWeather };
+                    });
+                    setWeatherData(enhancedWeatherInfo);
+                } else {
+                    setWeatherData(null);
+                }
 
                 const totalRideTime = cumulativeRideTime;
                 const totalBreakTime = (stopResults.length - 1) * (config.stopDuration / 60); 
@@ -496,6 +784,7 @@
                         avgSpeed: (367.6 / totalRideTime).toFixed(1),
                         grossSpeed: (367.6 / totalTimeWithBreaks).toFixed(1),
                         baseSpeedUsed: baseSpeedToUse, 
+                        weatherSource: weatherSourceText,
                         totalNeeds: {
                             carbs: Math.ceil(totalCarbs),
                             water: Math.ceil(totalWater / 1000 * 10) / 10,
@@ -507,6 +796,7 @@
                     }
                 });
 
+                setIsProcessing(false);
                 setTimeout(() => {
                     document.getElementById('results-section')?.scrollIntoView({ behavior: 'smooth' });
                 }, 100);
@@ -526,8 +816,11 @@
             };
 
             const handleConfigChange = (e) => {
-                const { name, value } = e.target;
-                setConfig(prev => ({ ...prev, [name]: name.includes('Direction') || name.includes('startTime') ? value : Number(value) }));
+                const { name, value, type, checked } = e.target;
+                setConfig(prev => ({ 
+                    ...prev, 
+                    [name]: type === 'checkbox' ? checked : (name.includes('Direction') || name.includes('startTime') || name.includes('rideDate') ? value : Number(value)) 
+                }));
             };
 
             return (
@@ -538,11 +831,11 @@
                         <Bike size={32} />
                         <div>
                         <h1 className="text-2xl font-bold">北高 360 完賽配速與補給計算機</h1>
-                        <p className="text-blue-200 text-sm">支援 Strava GPX / FIT 紀錄分析</p>
+                        <p className="text-blue-200 text-sm">支援 Strava GPX / FIT 紀錄分析 • 即時氣象整合</p>
                         </div>
                     </div>
                     <div className="text-right text-blue-100 text-sm">
-                        版本: 4.1 (ESM 模組載入修復)
+                        版本: 6.2 (修復 Leaflet 匯入)
                     </div>
                     </div>
                 </header>
@@ -604,7 +897,6 @@
                                         </div>
                                     </div>
                                     
-                                    {/* 手動校正區塊 */}
                                     <div className="bg-orange-50 p-3 rounded-lg border border-orange-100 mt-2">
                                         <label className="text-xs font-bold text-orange-800 block mb-1 flex items-center gap-1">
                                             <Edit3 size={12}/> 
@@ -616,9 +908,6 @@
                                             onChange={(e) => setManualSpeed(e.target.value)}
                                             className="w-full p-2 text-lg font-bold text-center border border-orange-200 rounded focus:ring-2 focus:ring-orange-400 outline-none text-orange-700 bg-white"
                                         />
-                                        <p className="text-[10px] text-orange-600 mt-1">
-                                            * 若檔案分析有誤，請直接修改此數值
-                                        </p>
                                     </div>
 
                                     <button 
@@ -655,65 +944,97 @@
 
                         <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
                         <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
-                            <Timer size={20} className="text-blue-600" />
-                            2. 行程設定 (含休息)
+                            <CloudSun size={20} className="text-blue-600" />
+                            2. 騎乘日期與天氣
                         </h2>
                         <div className="space-y-4">
                             <div>
-                                <label className="text-sm font-medium text-slate-700 block mb-1">出發時間</label>
-                                <input 
-                                    type="time" 
-                                    name="startTime" 
-                                    value={config.startTime} 
-                                    onChange={handleConfigChange}
-                                    className="w-full p-2 border border-slate-300 rounded-md text-sm"
-                                />
-                            </div>
-                            <div>
-                                <label className="text-sm font-medium text-slate-700 block mb-1">預計每次停靠休息時間 (分鐘)</label>
+                                <label className="text-sm font-medium text-slate-700 block mb-1">預計騎乘日期</label>
                                 <div className="flex items-center gap-2">
-                                    <Coffee size={18} className="text-slate-400"/>
+                                    <Calendar size={18} className="text-slate-400"/>
                                     <input 
-                                        type="number" 
-                                        name="stopDuration" 
-                                        value={config.stopDuration} 
+                                        type="date" 
+                                        name="rideDate" 
+                                        value={config.rideDate} 
                                         onChange={handleConfigChange}
                                         className="w-full p-2 border border-slate-300 rounded-md text-sm"
                                     />
-                                    <span className="text-sm text-slate-500 whitespace-nowrap">分/站</span>
                                 </div>
-                                <p className="text-xs text-slate-400 mt-1">系統預設有 4 個主要補給點</p>
                             </div>
                             
-                            <hr className="border-slate-100 my-2"/>
-
-                            <div>
-                            <label className="text-sm font-medium text-slate-700 block mb-1">預估風向</label>
-                            <select 
-                                name="windDirection" 
-                                value={config.windDirection} 
-                                onChange={handleConfigChange}
-                                className="w-full p-2 border border-slate-300 rounded-md text-sm"
-                            >
-                                <option value="tail">北風 (大順風)</option>
-                                <option value="none">無風</option>
-                                <option value="side">側風</option>
-                                <option value="head">南風 (大逆風)</option>
-                            </select>
+                            <div className="flex items-center gap-2 bg-blue-50 p-3 rounded-lg border border-blue-100">
+                                <input 
+                                    type="checkbox" 
+                                    name="useRealWeather"
+                                    id="useRealWeather"
+                                    checked={config.useRealWeather}
+                                    onChange={handleConfigChange}
+                                    className="w-4 h-4 text-blue-600"
+                                />
+                                <label htmlFor="useRealWeather" className="text-sm text-blue-800 font-medium cursor-pointer">
+                                    自動抓取當日天氣預報 (推算風阻)
+                                </label>
                             </div>
-                            <div>
-                            <label className="text-sm font-medium text-slate-700 flex justify-between mb-1">
-                                <span>風速強度</span>
-                                <span className="text-blue-600">{config.windSpeed} km/h</span>
-                            </label>
-                            <input 
-                                type="range" 
-                                name="windSpeed" 
-                                min="0" max="40" 
-                                value={config.windSpeed} 
-                                onChange={handleConfigChange}
-                                className="w-full accent-blue-600" 
-                            />
+
+                            {!config.useRealWeather && (
+                                <div className="space-y-4 pt-2 animate-fade-in">
+                                    <div>
+                                        <label className="text-sm font-medium text-slate-700 block mb-1">手動預估風向</label>
+                                        <select 
+                                            name="windDirection" 
+                                            value={config.windDirection} 
+                                            onChange={handleConfigChange}
+                                            className="w-full p-2 border border-slate-300 rounded-md text-sm"
+                                        >
+                                            <option value="tail">北風 (大順風)</option>
+                                            <option value="none">無風</option>
+                                            <option value="side">側風</option>
+                                            <option value="head">南風 (大逆風)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-sm font-medium text-slate-700 flex justify-between mb-1">
+                                            <span>風速強度</span>
+                                            <span className="text-blue-600">{config.windSpeed} km/h</span>
+                                        </label>
+                                        <input 
+                                            type="range" 
+                                            name="windSpeed" 
+                                            min="0" max="40" 
+                                            value={config.windSpeed} 
+                                            onChange={handleConfigChange}
+                                            className="w-full accent-blue-600" 
+                                        />
+                                    </div>
+                                </div>
+                            )}
+
+                            <hr className="border-slate-100 my-2"/>
+                            
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="text-sm font-medium text-slate-700 block mb-1">出發時間</label>
+                                    <input 
+                                        type="time" 
+                                        name="startTime" 
+                                        value={config.startTime} 
+                                        onChange={handleConfigChange}
+                                        className="w-full p-2 border border-slate-300 rounded-md text-sm"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-sm font-medium text-slate-700 block mb-1">休息時間</label>
+                                    <div className="flex items-center gap-1">
+                                        <input 
+                                            type="number" 
+                                            name="stopDuration" 
+                                            value={config.stopDuration} 
+                                            onChange={handleConfigChange}
+                                            className="w-full p-2 border border-slate-300 rounded-md text-sm"
+                                        />
+                                        <span className="text-xs text-slate-500">分/站</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         </div>
@@ -723,10 +1044,9 @@
                         <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 flex-grow">
                         <h2 className="text-lg font-semibold flex items-center gap-2 mb-4">
                             <Utensils size={20} className="text-blue-600" />
-                            3. 補給策略設定
+                            3. 補給策略設定 (已更新預設)
                         </h2>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                            
                             <div className="space-y-4">
                             <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">每小時需求</h3>
                             <div>
@@ -749,17 +1069,6 @@
                                     className="w-20 p-2 border border-slate-300 rounded-md"
                                 />
                                 <span className="text-xs text-slate-500">建議 500-800ml</span>
-                                </div>
-                            </div>
-                            <div>
-                                <label className="text-sm text-slate-700 block mb-1">鈉/電解質 (mg/hr)</label>
-                                <div className="flex items-center gap-2">
-                                <input 
-                                    type="number" name="sodiumPerHour" 
-                                    value={config.sodiumPerHour} onChange={handleConfigChange}
-                                    className="w-20 p-2 border border-slate-300 rounded-md"
-                                />
-                                <span className="text-xs text-slate-500">依排汗量調整</span>
                                 </div>
                             </div>
                             </div>
@@ -797,8 +1106,8 @@
                                         : 'bg-slate-300 text-slate-500 cursor-not-allowed'}
                                 `}
                             >
-                                <PlayCircle size={24} />
-                                {results ? "重新計算數據" : "開始分析並產生報告"}
+                                {isProcessing ? <Clock className="animate-spin" /> : <PlayCircle size={24} />}
+                                {results ? "重新計算數據" : "抓取天氣並產生報告"}
                             </button>
                             {!fileStatus.isReady && !manualMode && (
                                 <p className="text-xs text-slate-400 mt-2">請先完成步驟 1 上傳檔案</p>
@@ -815,25 +1124,29 @@
                                 <CheckCircle className="text-green-500" />
                                 <h2 className="text-2xl font-bold text-slate-800">分析完成</h2>
                             </div>
-                            <div className="flex bg-slate-100 p-1 rounded-lg self-start md:self-auto">
-                            {['summary', 'segments', 'stops'].map(tab => (
+                            <div className="flex bg-slate-100 p-1 rounded-lg self-start md:self-auto overflow-x-auto">
+                            {['summary', 'map', 'weather', 'stop_list', 'segments', 'stops'].map(tab => (
                                 <button
                                 key={tab}
                                 onClick={() => setActiveTab(tab)}
-                                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                                className={`px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${
                                     activeTab === tab 
                                     ? 'bg-white text-blue-600 shadow-sm' 
                                     : 'text-slate-500 hover:text-slate-700'
                                 }`}
                                 >
                                 {tab === 'summary' && '總結概覽'}
+                                {tab === 'map' && '路線地圖'}
+                                {tab === 'weather' && '途經天氣'}
+                                {tab === 'stop_list' && '停靠清單'}
                                 {tab === 'segments' && '分段配速'}
-                                {tab === 'stops' && '補給停靠'}
+                                {tab === 'stops' && '補給詳情'}
                                 </button>
                             ))}
                             </div>
                         </div>
 
+                        {/* Summary Tab */}
                         {activeTab === 'summary' && (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                             <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-6 rounded-xl shadow-md">
@@ -855,8 +1168,11 @@
                                 <div className="text-slate-500 text-sm font-medium mb-1">騎乘均速 (不含休)</div>
                                 <div className="text-3xl font-bold text-slate-800 mb-2">{results.summary.avgSpeed} <span className="text-lg font-normal text-slate-500">km/h</span></div>
                                 <div className="text-xs text-slate-500 border-t pt-2 mt-2">
-                                    總均速 (含休): {results.summary.grossSpeed} km/h<br/>
-                                    <span className="text-orange-600">基準: {results.summary.baseSpeedUsed} km/h (修正後)</span>
+                                    <div className="flex justify-between">
+                                        <span>環境依據:</span>
+                                        <span className="font-bold text-blue-600">{results.summary.weatherSource}</span>
+                                    </div>
+                                    <div className="mt-1 text-xs text-slate-400">基礎能力: {results.summary.baseSpeedUsed} km/h</div>
                                 </div>
                             </div>
 
@@ -880,6 +1196,111 @@
                         </div>
                         )}
 
+                        {/* Map Tab (New) */}
+                        {activeTab === 'map' && (
+                            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+                                <div className="mb-4 flex items-center justify-between">
+                                    <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                        <MapIcon size={20} /> 路線與停靠點概覽
+                                    </h3>
+                                    <span className="text-xs text-slate-500">點擊地圖標記查看詳細資訊</span>
+                                </div>
+                                <RouteMap stops={results.stops} startPoint={START_POINT} />
+                            </div>
+                        )}
+
+                        {/* Weather Tab */}
+                        {activeTab === 'weather' && (
+                            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                                {weatherData ? (
+                                    <div className="overflow-x-auto">
+                                    <table className="w-full text-sm text-left">
+                                        <thead className="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
+                                            <tr>
+                                                <th className="px-6 py-4">觀測點 (里程)</th>
+                                                <th className="px-6 py-4">預估經過時間</th>
+                                                <th className="px-6 py-4">氣溫</th>
+                                                <th className="px-6 py-4">天氣</th>
+                                                <th className="px-6 py-4">風向/風速</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {weatherData.map((wp, idx) => {
+                                                const est = wp.estimate;
+                                                if (!est) return null;
+                                                
+                                                return (
+                                                    <tr key={idx} className="hover:bg-slate-50">
+                                                        <td className="px-6 py-4">
+                                                            <div className="font-bold text-slate-800">{wp.name}</div>
+                                                            <div className="text-xs text-slate-400">{wp.km} km</div>
+                                                        </td>
+                                                        <td className="px-6 py-4 text-blue-600 font-mono font-medium">
+                                                            {est.time}
+                                                        </td>
+                                                        <td className="px-6 py-4">
+                                                            <div className="flex items-center gap-1">
+                                                                <Thermometer size={16} className={est.temp > 28 ? "text-red-500" : "text-blue-500"}/>
+                                                                {est.temp}°C
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-6 py-4">{getWeatherDesc(est.code)}</td>
+                                                        <td className="px-6 py-4">
+                                                            <div className="font-bold text-slate-700">{getWindDirectionText(est.dir)}</div>
+                                                            <div className="text-xs text-slate-500">{est.wind} km/h</div>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                    </div>
+                                ) : (
+                                    <div className="p-8 text-center text-slate-500">
+                                        <CloudSun size={48} className="mx-auto mb-2 opacity-50" />
+                                        <p>無詳細天氣資料</p>
+                                        <p className="text-xs opacity-70">可能是日期太久遠，或是使用了手動風向模式。</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Stop List Tab */}
+                        {activeTab === 'stop_list' && (
+                            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                                <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="bg-slate-100 text-slate-600 font-bold border-b border-slate-200">
+                                        <tr>
+                                            <th className="px-4 py-3 w-16">站序</th>
+                                            <th className="px-4 py-3">停靠點名稱</th>
+                                            <th className="px-4 py-3">里程</th>
+                                            <th className="px-4 py-3">抵達 (ETA)</th>
+                                            <th className="px-4 py-3">出發 (ETD)</th>
+                                            <th className="px-4 py-3">補給重點</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {results.stops.map((stop, idx) => (
+                                            <tr key={idx} className={stop.name.includes("終點") ? "bg-green-50" : "hover:bg-slate-50"}>
+                                                <td className="px-4 py-3 text-center text-slate-400 font-mono">{idx + 1}</td>
+                                                <td className="px-4 py-3 font-bold text-slate-800">{stop.name}</td>
+                                                <td className="px-4 py-3 font-mono">{stop.km}k</td>
+                                                <td className="px-4 py-3 font-mono text-blue-600 font-bold">{stop.eta}</td>
+                                                <td className="px-4 py-3 font-mono text-slate-600">{stop.etd}</td>
+                                                <td className="px-4 py-3 text-xs text-slate-500 max-w-xs">{stop.suggestion}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                </div>
+                                <div className="p-3 bg-slate-50 text-xs text-center text-slate-400">
+                                    * 建議將此表截圖儲存至手機相簿以便隨時查看
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Segments Tab */}
                         {activeTab === 'segments' && (
                         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                             <div className="overflow-x-auto">
@@ -929,6 +1350,7 @@
                         </div>
                         )}
 
+                        {/* Detailed Stops Tab */}
                         {activeTab === 'stops' && (
                         <div className="grid grid-cols-1 gap-4">
                             {results.stops.map((stop, idx) => (
@@ -936,6 +1358,7 @@
                                     <div className="bg-blue-600 text-white rounded-lg p-3 w-full md:w-32 text-center shrink-0">
                                         <div className="text-xs opacity-80 font-medium">預計抵達 (ETA)</div>
                                         <div className="text-2xl font-bold">{stop.eta}</div>
+                                        {stop.etaDate && <div className="text-[10px] opacity-80">{stop.etaDate}</div>}
                                         {!stop.name.includes("終點") && (
                                             <div className="text-[10px] mt-1 opacity-90 border-t border-blue-400 pt-1">
                                                 休 {stop.breakDuration} 分 → {stop.etd} 出發
@@ -944,34 +1367,45 @@
                                     </div>
                                     
                                     <div className="flex-grow min-w-0">
-                                    <div className="flex items-center gap-2 mb-1">
-                                        <h3 className="font-bold text-lg text-slate-800">{stop.name}</h3>
-                                        <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-600 border border-slate-200">
-                                        {stop.km}km
-                                        </span>
-                                    </div>
-                                    <div className="text-sm text-slate-500 mb-2">
-                                        {stop.type}
-                                    </div>
-                                    
-                                    {stop.name !== "終點 (大義國中)" && (
-                                        <div className="bg-slate-50 p-3 rounded-lg text-sm border border-slate-100">
-                                            <div className="font-semibold text-slate-700 mb-1 flex items-center gap-1">
-                                            <Utensils size={14} /> 建議補給內容
+                                        <div className="flex justify-between items-start">
+                                            <div>
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <h3 className="font-bold text-lg text-slate-800">{stop.name}</h3>
+                                                    <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-600 border border-slate-200">
+                                                    {stop.km}km
+                                                    </span>
+                                                </div>
+                                                <div className="text-sm text-slate-500 mb-2">
+                                                    {stop.type}
+                                                </div>
                                             </div>
-                                            <div className="text-slate-600 mb-2">{stop.suggestion}</div>
-                                            <div className="flex gap-3 text-xs text-slate-500">
-                                            <span>需補水: <strong>{stop.needs.water}ml</strong></span>
-                                            <span>需補碳: <strong>{stop.needs.carbs}g</strong></span>
-                                            </div>
+                                            {/* Stop Weather Badge */}
+                                            {stop.weather && (
+                                                <div className="bg-slate-50 border border-slate-200 rounded px-2 py-1 text-right text-xs">
+                                                    <div className="font-bold text-slate-700">{getWeatherDesc(stop.weather.code)}</div>
+                                                    <div className="text-slate-500">{stop.weather.temp}°C {getWindDirectionText(stop.weather.windDir)}</div>
+                                                </div>
+                                            )}
                                         </div>
-                                    )}
                                     
-                                    {stop.name === "終點 (大義國中)" && (
-                                        <div className="bg-green-50 text-green-800 p-3 rounded-lg text-sm font-medium">
-                                        🎉 恭喜完賽！請立即補充恢復飲品（巧克力牛奶/豆漿）與優質蛋白質。
-                                        </div>
-                                    )}
+                                        {stop.name !== "終點 (大義國中)" && (
+                                            <div className="bg-slate-50 p-3 rounded-lg text-sm border border-slate-100">
+                                                <div className="font-semibold text-slate-700 mb-1 flex items-center gap-1">
+                                                <Utensils size={14} /> 建議補給內容
+                                                </div>
+                                                <div className="text-slate-600 mb-2">{stop.suggestion}</div>
+                                                <div className="flex gap-3 text-xs text-slate-500">
+                                                <span>需補水: <strong>{stop.needs.water}ml</strong></span>
+                                                <span>需補碳: <strong>{stop.needs.carbs}g</strong></span>
+                                                </div>
+                                            </div>
+                                        )}
+                                        
+                                        {stop.name === "終點 (大義國中)" && (
+                                            <div className="bg-green-50 text-green-800 p-3 rounded-lg text-sm font-medium">
+                                            🎉 恭喜完賽！請立即補充恢復飲品（巧克力牛奶/豆漿）與優質蛋白質。
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             ))}
